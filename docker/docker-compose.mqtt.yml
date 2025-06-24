@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-mosquitto
+    restart: unless-stopped
+    ports:
+      - "${MQTT_PORT:-1883}:1883"      # MQTT
+      - "${MQTT_WS_PORT:-9001}:9001"   # WebSocket
+    volumes:
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_logs:/mosquitto/log
+      - ./configs/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./configs/mosquitto/passwd:/mosquitto/config/passwd
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t health -m 'check' -u ${MQTT_USERNAME:-mqttuser} -P ${MQTT_PASSWORD:-mqttpass123} || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=backend"
+      - "traefik.http.routers.mqtt.rule=Host(`mqtt.localhost`)"
+      - "traefik.http.services.mqtt.loadbalancer.server.port=9001"
+      - "traefik.tcp.routers.mqtt-tcp.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.mqtt-tcp.entrypoints=mqtt"
+      - "traefik.tcp.services.mqtt-tcp.loadbalancer.server.port=1883"
+
+  # MQTT Client for testing (optional)
+  mqtt-client:
+    image: eclipse-mosquitto:2.0
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-mqtt-client
+    restart: "no"
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    networks:
+      - backend
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+      - MQTT_HOST=mosquitto
+      - MQTT_PORT=1883
+      - MQTT_USERNAME=${MQTT_USERNAME:-mqttuser}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-mqttpass123}
+    command: >
+      sh -c "
+        echo 'MQTT Client ready for testing';
+        echo 'Test publish: mosquitto_pub -h mosquitto -t test/topic -m \"Hello World\" -u ${MQTT_USERNAME:-mqttuser} -P ${MQTT_PASSWORD:-mqttpass123}';
+        echo 'Test subscribe: mosquitto_sub -h mosquitto -t test/# -u ${MQTT_USERNAME:-mqttuser} -P ${MQTT_PASSWORD:-mqttpass123}';
+        tail -f /dev/null
+      "
+    profiles:
+      - test
+
+volumes:
+  mosquitto_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/mosquitto/data
+
+  mosquitto_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/mosquitto/logs
+
+networks:
+  backend:
+    name: ${COMPOSE_PROJECT_NAME:-myapp}-backend
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24

@@ -1,0 +1,23 @@
+
+# Docker volumes and logs
+docker/volumes/
+docker/logs/
+docker/.env
+*.log
+docker/configs/mosquitto/passwd
+
+# Environment files
+.env.local
+.env.*.local
+.env
+
+# Docker volumes and logs
+
+# Environment files
+docker/.env.backup
+
+.idea
+
+README.md
+
+

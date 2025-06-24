@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+      - ./configs/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+    command: >
+      redis-server /usr/local/etc/redis/redis.conf
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory ${REDIS_MAX_MEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+    networks:
+      - cache
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=cache"
+      - "traefik.http.routers.redis.rule=Host(`redis.localhost`)"
+      - "traefik.http.services.redis.loadbalancer.server.port=6379"
+
+  # Redis Commander for management
+  redis-commander:
+    image: ghcr.io/joeferner/redis-commander:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-redis-commander
+    restart: unless-stopped
+    ports:
+      - "${REDIS_COMMANDER_PORT:-8081}:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+      - TZ=${TZ:-Asia/Jakarta}
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - cache
+      - admin
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=admin"
+      - "traefik.http.routers.redis-commander.rule=Host(`redis-commander.localhost`)"
+      - "traefik.http.services.redis-commander.loadbalancer.server.port=8081"
+    profiles:
+      - tools
+
+volumes:
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/redis
+
+networks:
+  cache:
+    name: ${COMPOSE_PROJECT_NAME:-myapp}-cache
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.23.0.0/24
+
+  admin:
+    name: ${COMPOSE_PROJECT_NAME:-myapp}-admin
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.24.0.0/24

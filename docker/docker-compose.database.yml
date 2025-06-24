@@ -1,0 +1,177 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-myapp}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres123}
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+      - TZ=${TZ:-Asia/Jakarta}
+      - PGTZ=${TZ:-Asia/Jakarta}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./configs/postgres/init:/docker-entrypoint-initdb.d
+      - postgres_backups:/backups
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-myapp}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+
+  # InfluxDB Time Series Database
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-influxdb
+    restart: unless-stopped
+    ports:
+      - "${INFLUXDB_PORT:-8086}:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USERNAME:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD:-admin123}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG:-myorg}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET:-mybucket}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN:-my-super-secret-auth-token}
+      - TZ=${TZ:-Asia/Jakarta}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+      - influxdb_backups:/backups
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=database"
+      - "traefik.http.routers.influxdb.rule=Host(`influxdb.localhost`)"
+      - "traefik.http.services.influxdb.loadbalancer.server.port=8086"
+
+  # Database Administration Tool
+  adminer:
+    image: adminer:4.8.1
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-adminer
+    restart: unless-stopped
+    ports:
+      - "${ADMINER_PORT:-8080}:8080"
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+      - ADMINER_DEFAULT_SERVER=postgres
+      - ADMINER_DESIGN=nette
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - admin
+      - database
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=admin"
+      - "traefik.http.routers.adminer.rule=Host(`adminer.localhost`)"
+      - "traefik.http.services.adminer.loadbalancer.server.port=8080"
+    profiles:
+      - tools
+
+  # Database Backup Service
+  db-backup:
+    image: postgres:15-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-db-backup
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - PGPASSWORD=${POSTGRES_PASSWORD:-postgres123}
+      - TZ=${TZ:-Asia/Jakarta}
+    volumes:
+      - postgres_backups:/backups
+      - ./scripts/backup.sh:/backup.sh
+    networks:
+      - database
+    command: >
+      sh -c "
+        echo 'Database backup service ready';
+        echo 'Run: docker-compose exec db-backup /backup.sh';
+        tail -f /dev/null
+      "
+    profiles:
+      - backup
+
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/postgres/data
+
+  postgres_backups:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/postgres/backups
+
+  influxdb_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/influxdb/data
+
+  influxdb_config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/influxdb/config
+
+  influxdb_backups:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/volumes/influxdb/backups
+
+networks:
+  database:
+    name: ${COMPOSE_PROJECT_NAME:-myapp}-database
+    driver: bridge
+    internal: true  # Isolated network
+    ipam:
+      config:
+        - subnet: 172.22.0.0/24
+
+  admin:
+    name: ${COMPOSE_PROJECT_NAME:-myapp}-admin
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.24.0.0/24

@@ -1,0 +1,249 @@
+version: '3.8'
+
+services:
+  # Traefik Reverse Proxy
+  traefik:
+    image: traefik:v2.10
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-traefik
+    restart: unless-stopped
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8090:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - frontend
+      - backend
+      - database
+      - cache
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.localhost`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+    profiles:
+      - proxy
+
+  # Redis Service
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+      - ./configs/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+    command: >
+      redis-server /usr/local/etc/redis/redis.conf
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory ${REDIS_MAX_MEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+    networks:
+      - cache
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=cache"
+      - "traefik.http.routers.redis.rule=Host(`redis.localhost`)"
+      - "traefik.http.services.redis.loadbalancer.server.port=6379"
+
+  # Mosquitto MQTT Broker
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-mosquitto
+    restart: unless-stopped
+    ports:
+      - "${MQTT_PORT:-1883}:1883"      # MQTT
+      - "${MQTT_WS_PORT:-9001}:9001"   # WebSocket
+    volumes:
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_logs:/mosquitto/log
+      - ./configs/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./configs/mosquitto/passwd:/mosquitto/config/passwd
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m 'health check' -u ${MQTT_USERNAME:-mqttuser} -P ${MQTT_PASSWORD:-mqttpass123} || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=backend"
+      - "traefik.http.routers.mqtt.rule=Host(`mqtt.localhost`)"
+      - "traefik.http.services.mqtt.loadbalancer.server.port=9001"
+
+  # InfluxDB
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-influxdb
+    restart: unless-stopped
+    ports:
+      - "${INFLUXDB_PORT:-8086}:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USERNAME:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD:-admin123}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG:-myorg}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET:-mybucket}
+      - TZ=${TZ:-Asia/Jakarta}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=database"
+      - "traefik.http.routers.influxdb.rule=Host(`influxdb.localhost`)"
+      - "traefik.http.services.influxdb.loadbalancer.server.port=8086"
+    profiles:
+      - database
+
+  # PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-postgres
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"  # Bind to localhost only
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-myapp}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres123}
+      - TZ=${TZ:-Asia/Jakarta}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - database
+
+  # Development Tools
+  redis-commander:
+    image: ghcr.io/joeferner/redis-commander:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-redis-commander
+    restart: unless-stopped
+    ports:
+      - "${REDIS_COMMANDER_PORT:-8081}:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+      - TZ=${TZ:-Asia/Jakarta}
+    depends_on:
+      - redis
+    networks:
+      - admin
+      - cache
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=admin"
+      - "traefik.http.routers.redis-commander.rule=Host(`redis-commander.localhost`)"
+      - "traefik.http.services.redis-commander.loadbalancer.server.port=8081"
+    profiles:
+      - tools
+
+  adminer:
+    image: adminer:4.8.1
+    container_name: ${COMPOSE_PROJECT_NAME:-myapp}-adminer
+    restart: unless-stopped
+    ports:
+      - "${ADMINER_PORT:-8080}:8080"
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+    depends_on:
+      - postgres
+    networks:
+      - admin
+      - database
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=admin"
+      - "traefik.http.routers.adminer.rule=Host(`adminer.localhost`)"
+      - "traefik.http.services.adminer.loadbalancer.server.port=8080"
+    profiles:
+      - tools
+
+volumes:
+  redis_data:
+    driver: local
+  mosquitto_data:
+    driver: local
+  mosquitto_logs:
+    driver: local
+  postgres_data:
+    driver: local
+  influxdb_data:
+    driver: local
+  influxdb_config:
+    driver: local
+
+networks:
+  # Frontend network - for external access
+  frontend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+  # Backend network - for application services
+  backend:
+    driver: bridge
+    internal: false  # Allow external communication for MQTT
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+
+  # Database network
+  database:
+    driver: bridge
+    internal: false   # Allow host access
+    ipam:
+      config:
+        - subnet: 172.22.0.0/24
+    driver_opts:
+      com.docker.network.bridge.name: br-database
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"  # Bind only to localhost
+
+  # Cache network - for Redis and caching services
+  cache:
+    driver: bridge
+    internal: true   # Isolated, only internal communication
+    ipam:
+      config:
+        - subnet: 172.23.0.0/24
+
+  # Admin network - for management tools
+  admin:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.24.0.0/24
