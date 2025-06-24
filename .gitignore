@@ -20,4 +20,5 @@ docker/.env.backup
 
 README.md
 
-
+scripts/setup.sh
+scripts/DEPRECATED_test-connection.sh
