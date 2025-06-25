@@ -9,6 +9,7 @@ import (
 func init() {
 	config.LoadEnv()
 	db.PostgresInit()
+	db.InfluxDBInit()
 }
 
 func main() {
